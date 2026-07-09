@@ -11,7 +11,7 @@ const { getMarketData } = require('../services/marketdata');
 const { getBurnInfo } = require('../services/burn');
 const { getEthPriceUsd } = require('../evm/price');
 const { walletAddress } = require('../evm/provider');
-const { toPublicActivityRow, toPublicStats, toPublicSummary } = require('../services/format');
+const { toPublicActivityRow, toPublicStats, toPublicSummary, buildUnclaimedPayload } = require('../services/format');
 const config = require('../config');
 const { nextRun } = require('../services/countdown');
 
@@ -143,6 +143,22 @@ const loadSummary = cached(10000, async () => {
 router.get('/summary', async (req, res, next) => {
   try {
     res.json(await loadSummary());
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /accrual — fees accrued toward the next drop, frontend-shaped
+// ({ accruedUsd, thresholdUsd }). Public mirror of /api/unclaimed: the /api
+// namespace may sit behind an API key in deployments, this router never does.
+const loadAccrual = cached(15000, async () => {
+  const [{ eth }, price] = await Promise.all([getUnclaimedEth(), getEthPriceUsd()]);
+  const { unclaimedUsd, claimThresholdUsd } = buildUnclaimedPayload(eth, price);
+  return { accruedUsd: unclaimedUsd ?? 0, thresholdUsd: claimThresholdUsd };
+});
+router.get('/accrual', async (req, res, next) => {
+  try {
+    res.json(await loadAccrual());
   } catch (err) {
     next(err);
   }
