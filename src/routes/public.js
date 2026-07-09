@@ -8,6 +8,7 @@ const express = require('express');
 const repo = require('../db/repository');
 const { getUnclaimedEth } = require('../services/metrics');
 const { getMarketData } = require('../services/marketdata');
+const { getBurnInfo } = require('../services/burn');
 const { getEthPriceUsd } = require('../evm/price');
 const { walletAddress } = require('../evm/provider');
 const { toPublicActivityRow, toPublicStats, toPublicSummary } = require('../services/format');
@@ -142,6 +143,17 @@ const loadSummary = cached(10000, async () => {
 router.get('/summary', async (req, res, next) => {
   try {
     res.json(await loadSummary());
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /burn — NOXA automatic-burn stats for the frontend's "Accrued fees" card:
+// uncollected token-side LP fees (queued to burn) + burn-address balance so far.
+const loadBurn = cached(15000, getBurnInfo);
+router.get('/burn', async (req, res, next) => {
+  try {
+    res.json(await loadBurn());
   } catch (err) {
     next(err);
   }

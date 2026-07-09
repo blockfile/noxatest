@@ -61,15 +61,13 @@ async function getLaunchedToken(token = config.tokenAddress) {
 }
 
 /**
- * Read the claimable creator-fee balance WITHOUT claiming (gates the trigger).
- * Estimate: creator share (CREATOR_FEE_SHARE_PCT) of the WETH-side uncollected
- * LP fees, read by static-calling the position manager's collect() as the locker.
- * @returns {Promise<number>} claimable ETH (WETH)
+ * Read the uncollected LP fees for the launched token WITHOUT claiming, split
+ * into the WETH side (creator payout source) and the token side (which NOXA
+ * mostly burns when collect() runs). Read by static-calling the position
+ * manager's collect() as the locker. Live mode only.
+ * @returns {Promise<{wethRaw: bigint, tokenRaw: bigint}>} base units
  */
-async function getClaimableEth() {
-  if (config.dryRun) {
-    return simvault.peek(); // pure read — accrual happens in simulateFeeAccrual()
-  }
+async function getUncollectedLpFees() {
   const launch = await getLaunchedToken();
   if (!launch.exists) throw new Error(`token ${config.tokenAddress} was not launched via the NOXA factory`);
 
@@ -84,8 +82,24 @@ async function getClaimableEth() {
     { from: config.noxaLocker } // the locker owns the position NFT
   );
   // launch.isToken0 == our token is token0 → WETH (pair token) is the other side.
-  const wethSide = launch.isToken0 ? amount1 : amount0;
-  const creatorShare = (wethSide * BigInt(Math.round(config.creatorFeeSharePct * 100))) / 10000n;
+  return {
+    wethRaw: launch.isToken0 ? amount1 : amount0,
+    tokenRaw: launch.isToken0 ? amount0 : amount1,
+  };
+}
+
+/**
+ * Read the claimable creator-fee balance WITHOUT claiming (gates the trigger).
+ * Estimate: creator share (CREATOR_FEE_SHARE_PCT) of the WETH-side uncollected
+ * LP fees.
+ * @returns {Promise<number>} claimable ETH (WETH)
+ */
+async function getClaimableEth() {
+  if (config.dryRun) {
+    return simvault.peek(); // pure read — accrual happens in simulateFeeAccrual()
+  }
+  const { wethRaw } = await getUncollectedLpFees();
+  const creatorShare = (wethRaw * BigInt(Math.round(config.creatorFeeSharePct * 100))) / 10000n;
   return Number(formatEther(creatorShare));
 }
 
@@ -136,6 +150,7 @@ async function claimCreatorFees() {
 module.exports = {
   getLaunchedToken,
   launcherToken,
+  getUncollectedLpFees,
   getClaimableEth,
   simulateFeeAccrual,
   claimCreatorFees,

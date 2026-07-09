@@ -44,6 +44,7 @@ app.get('/', (req, res) => {
       'GET  /stats',
       'GET  /airdrops',
       'GET  /summary',
+      'GET  /burn',
       'GET  /countdown',
       'GET  /api/status',
       'GET  /api/unclaimed',
