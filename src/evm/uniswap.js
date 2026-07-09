@@ -30,16 +30,21 @@ async function resolvePoolFee(token) {
   }
 }
 
-/** Ensure the wallet holds >= amountIn WETH, wrapping native ETH to cover a shortfall. */
+/**
+ * Ensure the wallet holds >= amountIn WETH, wrapping native ETH to cover a
+ * shortfall — but never dipping into the gas reserve: the wrap itself plus the
+ * approve/swap/airdrop txs that follow all need native ETH.
+ */
 async function ensureWethBalance(amountIn) {
   const weth = wethContract(wallet);
   const bal = await weth.balanceOf(wallet.address);
   if (bal >= amountIn) return;
   const shortfall = amountIn - bal;
+  const gasReserve = parseEther(String(config.gasReserveEth));
   const native = await provider.getBalance(wallet.address);
-  if (native <= shortfall) {
+  if (native < shortfall + gasReserve) {
     throw new Error(
-      `insufficient WETH+ETH: need ${formatEther(amountIn)} WETH, have ${formatEther(bal)} WETH + ${formatEther(native)} ETH`
+      `insufficient WETH+ETH: need ${formatEther(amountIn)} WETH (+${formatEther(gasReserve)} ETH gas reserve), have ${formatEther(bal)} WETH + ${formatEther(native)} ETH`
     );
   }
   const tx = await weth.deposit({ value: shortfall });
@@ -76,6 +81,9 @@ async function buyToken(token, ethAmount) {
 
   const amountIn = parseEther(String(ethAmount));
   if (amountIn <= 0n) throw new Error(`invalid buy amount: ${ethAmount}`);
+  if (!(config.slippagePct >= 0 && config.slippagePct < 100)) {
+    throw new Error(`SLIPPAGE_PCT must be in [0, 100): ${config.slippagePct}`);
+  }
 
   await ensureWethBalance(amountIn);
   await ensureRouterAllowance(amountIn);

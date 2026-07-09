@@ -33,39 +33,43 @@ async function pollOnce(trigger) {
     return { ran: false, reason: 'cycle already running' };
   }
 
-  simulateFeeAccrual(); // no-op in live mode
-  const claimable = await getClaimableEth();
-  state.lastClaimable = claimable;
-  if (!(claimable > 0)) {
-    return { ran: false, claimable, reason: 'nothing claimable' };
-  }
-
-  // USD threshold gate: accumulate until the claim is worth pulling the trigger.
-  // Manual POST /api/run bypasses this via triggerNow().
-  if (config.claimThresholdUsd > 0) {
-    const price = await getEthPriceUsd();
-    if (price == null) {
-      // Can't price the claim — hold rather than claim blind; next tick retries.
-      return { ran: false, claimable, reason: 'ETH price unavailable — cannot evaluate USD threshold' };
-    }
-    const claimableUsd = +(claimable * price).toFixed(2);
-    state.lastClaimableUsd = claimableUsd;
-    if (claimableUsd < config.claimThresholdUsd) {
-      return {
-        ran: false,
-        claimable,
-        claimableUsd,
-        reason: `below threshold ($${claimableUsd} < $${config.claimThresholdUsd})`,
-      };
-    }
-  }
-
+  // Hold the run flag through the balance/price reads too — a manual
+  // POST /api/run landing between these awaits and the cycle start must not
+  // spawn a second concurrent cycle (wallet-nonce contention in live mode).
   state.isRunning = true;
-  state.lastRunAt = new Date().toISOString();
   try {
+    simulateFeeAccrual(); // no-op in live mode
+    const claimable = await getClaimableEth();
+    state.lastClaimable = claimable;
+    if (!(claimable > 0)) {
+      return { ran: false, claimable, reason: 'nothing claimable' };
+    }
+
+    // USD threshold gate: accumulate until the claim is worth pulling the trigger.
+    // Manual POST /api/run bypasses this via triggerNow().
+    let claimableUsd = null;
+    if (config.claimThresholdUsd > 0) {
+      const price = await getEthPriceUsd();
+      if (price == null) {
+        // Can't price the claim — hold rather than claim blind; next tick retries.
+        return { ran: false, claimable, reason: 'ETH price unavailable — cannot evaluate USD threshold' };
+      }
+      claimableUsd = +(claimable * price).toFixed(2);
+      state.lastClaimableUsd = claimableUsd;
+      if (claimableUsd < config.claimThresholdUsd) {
+        return {
+          ran: false,
+          claimable,
+          claimableUsd,
+          reason: `below threshold ($${claimableUsd} < $${config.claimThresholdUsd})`,
+        };
+      }
+    }
+
+    state.lastRunAt = new Date().toISOString();
     const cycle = await runCycle();
     state.lastResult = { id: cycle.id, status: cycle.status };
-    return { ran: true, claimable, cycle };
+    return { ran: true, claimable, claimableUsd, cycle };
   } finally {
     state.isRunning = false;
   }

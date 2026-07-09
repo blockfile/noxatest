@@ -90,12 +90,13 @@ const config = {
 
   // On-chain execution (live mode only)
   slippagePct: num(process.env.SLIPPAGE_PCT, 5), // Uniswap V3 swap slippage, percent
+  gasReserveEth: num(process.env.GAS_RESERVE_ETH, 0.005), // native ETH never wrapped/spent on buys
 
   // Trigger — the scheduler checks on this timer (default every 5 minutes) and
   // runs a cycle only once the claimable fees reach CLAIM_THRESHOLD_USD. Set the
   // threshold to 0 to claim whatever has accrued on every tick (the old timer mode).
   pollSchedule: process.env.POLL_SCHEDULE || '*/5 * * * *',
-  claimThresholdUsd: num(process.env.CLAIM_THRESHOLD_USD, 50),
+  claimThresholdUsd: num(process.env.CLAIM_THRESHOLD_USD, 20),
   // DRY_RUN only: simulated ETH added to the fee vault each tick, so cycles have
   // something to claim without real fees.
   dryRunFeePerPoll: num(process.env.DRY_RUN_FEE_PER_POLL, 0.01),

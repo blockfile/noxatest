@@ -10,7 +10,7 @@ const router = express.Router();
 function clamp(value, fallback, min, max) {
   const n = Number(value);
   if (!Number.isFinite(n)) return fallback;
-  return Math.min(Math.max(n, min), max);
+  return Math.min(Math.max(Math.trunc(n), min), max);
 }
 
 // GET /api/cycles?limit=&offset=  — paginated history

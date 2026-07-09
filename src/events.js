@@ -1,7 +1,7 @@
 'use strict';
 
 // Process-wide event bus for pushing live updates to SSE clients.
-// Emitters: repository (step, cycle), scheduler (scheduler, unclaimed).
+// Emitters: repository (step, cycle), scheduler (scheduler).
 const { EventEmitter } = require('events');
 
 const bus = new EventEmitter();
