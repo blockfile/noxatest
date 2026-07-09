@@ -88,17 +88,19 @@ async function runCycle() {
     const claim = await claimCreatorFees();
     await repo.addStep({ cycleId: id, name: 'claim', status: 'ok', signature: claim.signature, detail: { ethClaimed: claim.ethClaimed } });
     log(`claimed ${claim.ethClaimed} ETH`);
-    if (!(claim.ethClaimed > 0)) {
-      await repo.finishCycle(id, { status: 'skipped', eth_claimed: claim.ethClaimed, note: 'nothing claimed' });
-      return repo.getCycleWithSteps(id);
-    }
 
     // Distribute the wallet's WHOLE WETH balance — this claim plus any residue
     // stranded by previously failed cycles. Healthy cycles end with ~0 WETH
     // (the remainder is unwrapped to native ETH), so normally these are equal.
+    // Skip only when BOTH are empty, so a manual run can flush residue even
+    // when nothing new was claimable.
     const distributableEth = config.dryRun
       ? claim.ethClaimed
       : await getWethBalanceEth().catch(() => claim.ethClaimed);
+    if (!(distributableEth > 0)) {
+      await repo.finishCycle(id, { status: 'skipped', eth_claimed: claim.ethClaimed, note: 'nothing claimed' });
+      return repo.getCycleWithSteps(id);
+    }
     if (distributableEth > claim.ethClaimed) {
       log(`including ${+(distributableEth - claim.ethClaimed).toFixed(9)} WETH residue from prior cycles`);
     }

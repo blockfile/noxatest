@@ -3,6 +3,7 @@
 const { Interface } = require('ethers');
 const config = require('../config');
 const { provider, walletAddress } = require('./provider');
+const { getTokenSupplyRaw } = require('./erc20');
 
 const TRANSFER_IFACE = new Interface(['event Transfer(address indexed from, address indexed to, uint256 value)']);
 const TRANSFER_TOPIC = TRANSFER_IFACE.getEvent('Transfer').topicHash;
@@ -22,6 +23,20 @@ function filterEligible(accounts, minHoldRaw, excludeSet) {
     if (bal >= min) out.push({ owner, balanceRaw: bal.toString() });
   }
   return out;
+}
+
+// Pure: do the fetched balances account for (almost) the whole token supply?
+// Sum-of-balances == totalSupply is a hard on-chain invariant, so a shortfall
+// beyond `tolerancePct` means the source's data is incomplete — Blockscout
+// serves partial holder lists (HTTP 200!) while it is still backfilling a
+// token, which once mis-airdropped a whole cycle to a single holder.
+function coversSupply(accounts, supplyRaw, tolerancePct = 2) {
+  const supply = BigInt(supplyRaw.toString());
+  if (supply <= 0n) return true; // nothing to compare against
+  let sum = 0n;
+  for (const a of accounts) sum += BigInt(a.amountRaw.toString());
+  const diff = supply > sum ? supply - sum : sum - supply;
+  return diff * 100n <= supply * BigInt(tolerancePct);
 }
 
 // Pure: distinct owners with any nonzero balance — the "total holders" figure
@@ -118,17 +133,26 @@ async function snapshotEligibleHolders({ token, minHoldRaw, exclude }) {
     ];
     return { holders: filterEligible(sim, minHoldRaw, exclude), totalHolders: countOwners(sim) };
   }
+  const supplyRaw = await getTokenSupplyRaw(token);
   let accounts;
   let totalHolders;
   try {
     accounts = await fetchHoldersFromExplorer(token);
+    if (!coversSupply(accounts, supplyRaw)) {
+      throw new Error('explorer holder list incomplete (balances do not cover the token supply)');
+    }
     totalHolders = (await fetchHolderCount(token)) ?? countOwners(accounts);
   } catch (err) {
-    console.warn(`[holders] explorer unavailable (${err.message}) — rebuilding from Transfer logs`);
+    console.warn(`[holders] explorer unusable (${err.message}) — rebuilding from Transfer logs`);
     accounts = await fetchHoldersFromLogs(token);
+    if (!coversSupply(accounts, supplyRaw)) {
+      // Both sources failed the supply invariant — refusing beats mis-airdropping
+      // a whole cycle to whoever happens to be in the partial list.
+      throw new Error('holder set incomplete from both explorer and Transfer logs — refusing to distribute');
+    }
     totalHolders = countOwners(accounts);
   }
   return { holders: filterEligible(accounts, minHoldRaw, exclude), totalHolders };
 }
 
-module.exports = { filterEligible, countOwners, snapshotEligibleHolders };
+module.exports = { filterEligible, countOwners, coversSupply, snapshotEligibleHolders };
