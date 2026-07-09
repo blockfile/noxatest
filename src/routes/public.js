@@ -9,6 +9,7 @@ const repo = require('../db/repository');
 const { getUnclaimedEth } = require('../services/metrics');
 const { getMarketData } = require('../services/marketdata');
 const { getBurnInfo } = require('../services/burn');
+const { snapshotLegHolders } = require('../jobs/cycle');
 const { getEthPriceUsd } = require('../evm/price');
 const { walletAddress } = require('../evm/provider');
 const { toPublicActivityRow, toPublicStats, toPublicSummary, buildUnclaimedPayload } = require('../services/format');
@@ -119,12 +120,21 @@ router.get('/countdown', (req, res) => {
   res.json({ serverTime: now, nextAirdropAt, intervalSec });
 });
 
+// Live holder counts (same verified source as reward cycles: explorer checked
+// against total supply, Transfer-log fallback). Cached longer than the summary —
+// the log scan and exclusion lookups cost a handful of RPC calls. Falls back to
+// the last cycle's stored snapshot if the live read fails.
+const loadHolderCounts = cached(60000, async () => {
+  const s = await snapshotLegHolders({ holderToken: config.tokenAddress, minHold: config.minHold });
+  return { eligible: s.holders.length, total: s.totalHolders };
+});
+
 // Headline numbers for the frontend.
 const loadSummary = cached(10000, async () => {
   const [stats, byToken, holderCounts, price, market] = await Promise.all([
     repo.getStats(),
     repo.getAirdropTotals(),
-    repo.getLatestEligibleHolders(),
+    loadHolderCounts().catch(() => repo.getLatestEligibleHolders()),
     getEthPriceUsd().catch(() => 0),
     getMarketData().catch(() => ({ marketCap: null })),
   ]);

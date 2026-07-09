@@ -128,7 +128,6 @@ async function getStats() {
           completed: { $sum: { $cond: [{ $eq: ['$status', 'complete'] }, 1, 0] } },
           failed: { $sum: { $cond: [{ $eq: ['$status', 'failed'] }, 1, 0] } },
           skipped: { $sum: { $cond: [{ $eq: ['$status', 'skipped'] }, 1, 0] } },
-          total_eth_claimed: { $sum: { $ifNull: ['$eth_claimed', 0] } },
           total_eth_spent_buy: { $sum: { $ifNull: ['$eth_spent_buy', 0] } },
           total_tokens_bought: { $sum: { $ifNull: ['$tokens_bought', 0] } },
         },
@@ -136,17 +135,28 @@ async function getStats() {
     ])
     .toArray();
 
-  return (
-    row || {
+  // Sum claimed ETH from the claim STEPS, not the cycles: a step is recorded the
+  // moment a claim succeeds, while cycles.eth_claimed is only set at finish — a
+  // cycle that claims and then fails would silently drop its claim from the total.
+  const [claimRow] = await db
+    .collection('steps')
+    .aggregate([
+      { $match: { name: 'claim', status: 'ok' } },
+      { $group: { _id: null, eth: { $sum: { $ifNull: ['$detail.ethClaimed', 0] } } } },
+    ])
+    .toArray();
+
+  return {
+    ...(row || {
       cycles: 0,
       completed: 0,
       failed: 0,
       skipped: 0,
-      total_eth_claimed: 0,
       total_eth_spent_buy: 0,
       total_tokens_bought: 0,
-    }
-  );
+    }),
+    total_eth_claimed: claimRow ? claimRow.eth : 0,
+  };
 }
 
 async function addAirdrop({ cycleId, rewardToken, recipient, amountRaw, amountUi, signature, status }) {
