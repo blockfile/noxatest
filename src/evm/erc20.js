@@ -46,6 +46,13 @@ async function getTokenSupplyRaw(token) {
   return erc20(token).totalSupply();
 }
 
+/** The wallet's WETH balance in ETH units. DRY_RUN: 0 (no real WETH exists). */
+async function getWethBalanceEth() {
+  if (config.dryRun) return 0;
+  const bal = await wethContract().balanceOf(wallet.address);
+  return Number(formatEther(bal));
+}
+
 /**
  * If the wallet holds WETH (e.g. the post-buy remainder of a fee claim), unwrap
  * it to native ETH so gas stays topped up. No-op when the balance is zero.
@@ -69,5 +76,6 @@ module.exports = {
   getDecimals,
   readTokenBalance,
   getTokenSupplyRaw,
+  getWethBalanceEth,
   unwrapAllWeth,
 };

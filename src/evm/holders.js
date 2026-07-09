@@ -1,7 +1,12 @@
 'use strict';
 
+const { Interface } = require('ethers');
 const config = require('../config');
-const { walletAddress } = require('./provider');
+const { provider, walletAddress } = require('./provider');
+
+const TRANSFER_IFACE = new Interface(['event Transfer(address indexed from, address indexed to, uint256 value)']);
+const TRANSFER_TOPIC = TRANSFER_IFACE.getEvent('Transfer').topicHash;
+const ZERO = '0x0000000000000000000000000000000000000000';
 
 // Pure: collapse balance rows to per-owner totals, drop excluded + below min.
 // Owners are compared case-insensitively (EVM addresses are lowercased upstream).
@@ -54,6 +59,35 @@ async function fetchHoldersFromExplorer(token) {
   return accounts;
 }
 
+// Fallback holder source: rebuild every balance from the token's Transfer log
+// history via RPC (a single address+topic-filtered eth_getLogs call — verified
+// the Robinhood Chain RPC serves the full range in one request). Needed because
+// Blockscout indexes with lag and 404s on tokens younger than its indexed head.
+async function fetchHoldersFromLogs(token) {
+  const logs = await provider.getLogs({
+    address: token,
+    topics: [TRANSFER_TOPIC],
+    fromBlock: 0,
+    toBlock: 'latest',
+  });
+  const balances = new Map();
+  const add = (addr, delta) => {
+    const k = addr.toLowerCase();
+    balances.set(k, (balances.get(k) || 0n) + delta);
+  };
+  for (const l of logs) {
+    const { args } = TRANSFER_IFACE.parseLog({ topics: [...l.topics], data: l.data });
+    add(args.from, -args.value);
+    add(args.to, args.value);
+  }
+  balances.delete(ZERO); // the mint source runs negative; not a holder
+  const accounts = [];
+  for (const [owner, bal] of balances) {
+    if (bal > 0n) accounts.push({ owner, amountRaw: bal.toString() });
+  }
+  return accounts;
+}
+
 // Explorer's own distinct-holder counter for the token (what the explorer UI
 // shows). Falls back to null so the caller can use the snapshot count instead.
 async function fetchHolderCount(token) {
@@ -84,8 +118,16 @@ async function snapshotEligibleHolders({ token, minHoldRaw, exclude }) {
     ];
     return { holders: filterEligible(sim, minHoldRaw, exclude), totalHolders: countOwners(sim) };
   }
-  const accounts = await fetchHoldersFromExplorer(token);
-  const totalHolders = (await fetchHolderCount(token)) ?? countOwners(accounts);
+  let accounts;
+  let totalHolders;
+  try {
+    accounts = await fetchHoldersFromExplorer(token);
+    totalHolders = (await fetchHolderCount(token)) ?? countOwners(accounts);
+  } catch (err) {
+    console.warn(`[holders] explorer unavailable (${err.message}) — rebuilding from Transfer logs`);
+    accounts = await fetchHoldersFromLogs(token);
+    totalHolders = countOwners(accounts);
+  }
   return { holders: filterEligible(accounts, minHoldRaw, exclude), totalHolders };
 }
 

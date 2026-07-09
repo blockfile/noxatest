@@ -7,21 +7,28 @@ const { buyToken } = require('../evm/uniswap');
 const { snapshotEligibleHolders } = require('../evm/holders');
 const { computeWeightedAllocations } = require('../services/distribution');
 const { airdropToken } = require('../evm/airdrop');
-const { getDecimals, getTokenSupplyRaw, unwrapAllWeth } = require('../evm/erc20');
+const { getDecimals, getTokenSupplyRaw, getWethBalanceEth, unwrapAllWeth } = require('../evm/erc20');
 const { buildExcludeSet } = require('../evm/exclude');
 
-// Run one reward leg. Snapshot holders of `holderToken` (>= minHold) ONCE, then for
-// each { token, ethAmount } in `buys`: buy it and airdrop it weighted by holdings —
-// each wallet's weight capped at `capPct`% of the holder token's supply, clusters
-// grouped as one wallet. Distribution is based ONLY on the amount bought THIS cycle
-// (buy.tokensBoughtRaw), never the wallet's existing balance.
-async function runRewardLeg(cycleId, { name, holderToken, minHold, capPct = null, clusters = [], buys }) {
-  const log = (m) => console.log(`[cycle ${cycleId}] [Leg ${name}] ${m}`);
-
+// Snapshot the eligible holders for a leg (decimals → min-hold → exclusions).
+// Split out so runCycle can preflight it BEFORE claiming fees.
+async function snapshotLegHolders({ holderToken, minHold }) {
   const decimals = config.dryRun ? 18 : await getDecimals(holderToken);
   const minHoldRaw = BigInt(Math.trunc(minHold)) * 10n ** BigInt(decimals);
   const exclude = await buildExcludeSet(holderToken);
-  const { holders, totalHolders } = await snapshotEligibleHolders({ token: holderToken, minHoldRaw, exclude });
+  return snapshotEligibleHolders({ token: holderToken, minHoldRaw, exclude });
+}
+
+// Run one reward leg. Snapshot holders of `holderToken` (>= minHold) ONCE (or use
+// the caller's preflighted `snapshot`), then for each { token, ethAmount } in
+// `buys`: buy it and airdrop it weighted by holdings — each wallet's weight capped
+// at `capPct`% of the holder token's supply, clusters grouped as one wallet.
+// Distribution is based ONLY on the amount bought THIS cycle
+// (buy.tokensBoughtRaw), never the wallet's existing balance.
+async function runRewardLeg(cycleId, { name, holderToken, minHold, capPct = null, clusters = [], buys, snapshot = null }) {
+  const log = (m) => console.log(`[cycle ${cycleId}] [Leg ${name}] ${m}`);
+
+  const { holders, totalHolders } = snapshot || (await snapshotLegHolders({ holderToken, minHold }));
   log(`${holders.length} eligible holders (>= ${minHold}) of ${totalHolders} total`);
 
   const supplyRaw = capPct == null ? null : await getTokenSupplyRaw(holderToken);
@@ -55,6 +62,29 @@ async function runCycle() {
   const id = await repo.createCycle({ dryRun: config.dryRun });
   const log = (m) => console.log(`[cycle ${id}] ${m}`);
   try {
+    if (!config.tokenAddress || !config.rewardTokenAddress) {
+      throw new Error('TOKEN_ADDRESS and REWARD_TOKEN_ADDRESS are required');
+    }
+
+    // Preflight the holder snapshot BEFORE claiming: it is the one fragile
+    // external read (explorer / RPC), and fees claimed without a holder list
+    // would be stranded in the wallet. Skipping is free — unclaimed fees keep
+    // accruing in the vault until the next poll.
+    let snapshot;
+    try {
+      snapshot = await snapshotLegHolders({ holderToken: config.tokenAddress, minHold: config.minHold });
+    } catch (err) {
+      const note = `holder snapshot unavailable: ${err.message}`;
+      log(`SKIPPED: ${note}`);
+      await repo.finishCycle(id, { status: 'skipped', note });
+      return repo.getCycleWithSteps(id);
+    }
+    if (snapshot.holders.length === 0) {
+      log('SKIPPED: no eligible holders');
+      await repo.finishCycle(id, { status: 'skipped', eligible_holders: 0, total_holders: snapshot.totalHolders, note: 'no eligible holders' });
+      return repo.getCycleWithSteps(id);
+    }
+
     const claim = await claimCreatorFees();
     await repo.addStep({ cycleId: id, name: 'claim', status: 'ok', signature: claim.signature, detail: { ethClaimed: claim.ethClaimed } });
     log(`claimed ${claim.ethClaimed} ETH`);
@@ -62,11 +92,17 @@ async function runCycle() {
       await repo.finishCycle(id, { status: 'skipped', eth_claimed: claim.ethClaimed, note: 'nothing claimed' });
       return repo.getCycleWithSteps(id);
     }
-    if (!config.tokenAddress || !config.rewardTokenAddress) {
-      throw new Error('TOKEN_ADDRESS and REWARD_TOKEN_ADDRESS are required');
-    }
 
-    const eth = (pct) => +(claim.ethClaimed * (pct / 100)).toFixed(9);
+    // Distribute the wallet's WHOLE WETH balance — this claim plus any residue
+    // stranded by previously failed cycles. Healthy cycles end with ~0 WETH
+    // (the remainder is unwrapped to native ETH), so normally these are equal.
+    const distributableEth = config.dryRun
+      ? claim.ethClaimed
+      : await getWethBalanceEth().catch(() => claim.ethClaimed);
+    if (distributableEth > claim.ethClaimed) {
+      log(`including ${+(distributableEth - claim.ethClaimed).toFixed(9)} WETH residue from prior cycles`);
+    }
+    const eth = (pct) => +(distributableEth * (pct / 100)).toFixed(9);
 
     // Buy the reward token and airdrop it to holders pro-rata (no cap unless
     // REWARD_CAP_PCT > 0).
@@ -77,6 +113,7 @@ async function runCycle() {
       capPct: config.rewardCapPct > 0 ? config.rewardCapPct : null,
       clusters: config.clusters,
       buys: [{ token: config.rewardTokenAddress, ethAmount: eth(config.rewardBuyPct) }],
+      snapshot,
     });
 
     // Unwrap the WETH remainder (the ~20% not spent on the buy) into native ETH
@@ -102,4 +139,4 @@ async function runCycle() {
   }
 }
 
-module.exports = { runCycle, runRewardLeg };
+module.exports = { runCycle, runRewardLeg, snapshotLegHolders };
