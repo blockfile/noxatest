@@ -35,4 +35,9 @@ function toUsd(eth, price) {
   return +(eth * price).toFixed(2);
 }
 
-module.exports = { getEthPriceUsd, getCachedEthPriceUsd, toUsd };
+/** Test helper — prime the cache so tests never hit the network. */
+function _prime(value) {
+  cache = { value, at: Date.now() };
+}
+
+module.exports = { getEthPriceUsd, getCachedEthPriceUsd, toUsd, _prime };

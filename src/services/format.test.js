@@ -9,12 +9,13 @@ const {
   toPublicStats,
 } = require('./format');
 
-test('buildUnclaimedPayload reports the live balance only (no threshold fields)', () => {
+test('buildUnclaimedPayload reports the live balance and the USD claim threshold', () => {
   const out = buildUnclaimedPayload(0.5, 3000);
-  assert.deepStrictEqual(Object.keys(out).sort(), ['ethPriceUsd', 'unclaimedEth', 'unclaimedUsd']);
+  assert.deepStrictEqual(Object.keys(out).sort(), ['claimThresholdUsd', 'ethPriceUsd', 'unclaimedEth', 'unclaimedUsd']);
   assert.strictEqual(out.unclaimedEth, 0.5);
   assert.strictEqual(out.unclaimedUsd, 1500);
   assert.strictEqual(out.ethPriceUsd, 3000);
+  assert.strictEqual(typeof out.claimThresholdUsd, 'number');
   // null balance is preserved (RPC unavailable)
   assert.strictEqual(buildUnclaimedPayload(null, 3000).unclaimedEth, null);
 });

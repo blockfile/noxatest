@@ -63,6 +63,7 @@ router.get('/status', async (req, res, next) => {
       // Reward-loop parameters (trigger, fee split, cap, eligibility).
       config: {
         pollSchedule: config.pollSchedule,
+        claimThresholdUsd: config.claimThresholdUsd,
         rewardBuyPct: config.rewardBuyPct,
         rewardCapPct: config.rewardCapPct,
         minHold: config.minHold,

@@ -4,6 +4,7 @@ const cron = require('node-cron');
 const config = require('../config');
 const { runCycle } = require('./cycle');
 const { getClaimableEth, simulateFeeAccrual } = require('../evm/noxa');
+const { getEthPriceUsd } = require('../evm/price');
 const bus = require('../events');
 
 const state = {
@@ -13,16 +14,17 @@ const state = {
   lastRunAt: null,
   lastResult: null, // { id, status }
   lastClaimable: null,
+  lastClaimableUsd: null,
   startedAt: null,
 };
 
 /**
  * One timer tick (every POLL_SCHEDULE, default 5 minutes). Advances the simulated
  * vault (DRY_RUN only), reads the claimable creator-fee balance, and runs a cycle
- * claiming WHATEVER has accrued. Skips silently (no cycle row) when nothing is
- * claimable. Overlap-guarded.
+ * once it is worth >= CLAIM_THRESHOLD_USD (threshold 0 = claim whatever accrued).
+ * Skips silently (no cycle row) otherwise. Overlap-guarded.
  * @param {string} trigger 'poll' | 'manual'
- * @returns {Promise<{ran:boolean, claimable?:number, reason?:string, cycle?:object}>}
+ * @returns {Promise<{ran:boolean, claimable?:number, claimableUsd?:number, reason?:string, cycle?:object}>}
  */
 async function pollOnce(trigger) {
   if (state.paused) return { ran: false, reason: 'paused' };
@@ -36,6 +38,26 @@ async function pollOnce(trigger) {
   state.lastClaimable = claimable;
   if (!(claimable > 0)) {
     return { ran: false, claimable, reason: 'nothing claimable' };
+  }
+
+  // USD threshold gate: accumulate until the claim is worth pulling the trigger.
+  // Manual POST /api/run bypasses this via triggerNow().
+  if (config.claimThresholdUsd > 0) {
+    const price = await getEthPriceUsd();
+    if (price == null) {
+      // Can't price the claim — hold rather than claim blind; next tick retries.
+      return { ran: false, claimable, reason: 'ETH price unavailable — cannot evaluate USD threshold' };
+    }
+    const claimableUsd = +(claimable * price).toFixed(2);
+    state.lastClaimableUsd = claimableUsd;
+    if (claimableUsd < config.claimThresholdUsd) {
+      return {
+        ran: false,
+        claimable,
+        claimableUsd,
+        reason: `below threshold ($${claimableUsd} < $${config.claimThresholdUsd})`,
+      };
+    }
   }
 
   state.isRunning = true;
@@ -94,11 +116,13 @@ async function triggerNow() {
 function getState() {
   return {
     pollSchedule: config.pollSchedule,
+    claimThresholdUsd: config.claimThresholdUsd,
     paused: state.paused,
     isRunning: state.isRunning,
     lastRunAt: state.lastRunAt,
     lastResult: state.lastResult,
     lastClaimable: state.lastClaimable,
+    lastClaimableUsd: state.lastClaimableUsd,
     startedAt: state.startedAt,
   };
 }

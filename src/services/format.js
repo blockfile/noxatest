@@ -1,6 +1,7 @@
 'use strict';
 
 const { toUsd } = require('../evm/price');
+const config = require('../config');
 
 const TOKEN_SYMBOL = process.env.TOKEN_SYMBOL || 'TOKEN';
 
@@ -107,13 +108,15 @@ function toPublicStats({ stats, unclaimedEth, operatingWallet, market = {} }) {
 }
 
 // The unclaimed-fees card payload (used by /api/unclaimed and the SSE stream).
-// Timer model: a cycle claims whatever has accrued on a fixed schedule — there is
-// no claim threshold — so this reports the live balance only.
+// Fees accumulate until they are worth CLAIM_THRESHOLD_USD, then a cycle claims
+// them — claimThresholdUsd lets the frontend render a "$32 / $50" progress bar
+// (0 = no threshold: every tick claims whatever accrued).
 function buildUnclaimedPayload(eth, price) {
   return {
     unclaimedEth: eth == null ? null : +eth.toFixed(9),
     unclaimedUsd: toUsd(eth, price),
     ethPriceUsd: price,
+    claimThresholdUsd: config.claimThresholdUsd,
   };
 }
 

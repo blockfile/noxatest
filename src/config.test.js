@@ -8,6 +8,7 @@ test('config exposes the reward-loop defaults', () => {
   assert.strictEqual(config.rewardCapPct, 0);
   assert.strictEqual(config.minHold, 100000);
   assert.strictEqual(config.pollSchedule, '*/5 * * * *');
+  assert.strictEqual(config.claimThresholdUsd, 50);
   assert.strictEqual(config.dryRunFeePerPoll, 0.01);
   assert.strictEqual(config.airdropBatchSize, 8);
   assert.strictEqual(config.chainId, 4663);
