@@ -16,6 +16,8 @@ const ROUTER_ABI = [
 ];
 
 const DEFAULT_POOL_FEE = 10000; // NOXA Fun launches on the 1% fee tier
+const FEE_TIERS = [500, 3000, 10000]; // standard V3 tiers a token may pool on
+const BUY_ATTEMPTS = 3;
 
 function fakeSig(prefix) {
   return `${prefix}_${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
@@ -28,6 +30,26 @@ async function resolvePoolFee(token) {
   } catch (_err) {
     return DEFAULT_POOL_FEE; // not a NOXA launcher token — assume the 1% tier
   }
+}
+
+/**
+ * Quote the swap on every standard fee tier (by static-calling the swap itself)
+ * and return the best { fee, quoted }, or null when no tier has a pool. Tokens
+ * can pool on several tiers with wildly different depth, and a single tier's
+ * price can be transiently manipulated — the best CURRENT quote is the only
+ * reliable pool selector.
+ */
+async function bestQuote(router, baseParams) {
+  let best = null;
+  for (const fee of FEE_TIERS) {
+    try {
+      const quoted = await router.exactInputSingle.staticCall({ ...baseParams, fee });
+      if (!best || quoted > best.quoted) best = { fee, quoted };
+    } catch (_err) {
+      // no pool (or no liquidity) at this tier
+    }
+  }
+  return best;
 }
 
 /**
@@ -89,37 +111,55 @@ async function buyToken(token, ethAmount) {
   await ensureRouterAllowance(amountIn);
 
   const router = new Contract(config.swapRouter, ROUTER_ABI, wallet);
-  const fee = await resolvePoolFee(token);
-  const params = {
+  const baseParams = {
     tokenIn: config.weth,
     tokenOut: token,
-    fee,
     recipient: wallet.address,
     amountIn,
     amountOutMinimum: 0n,
     sqrtPriceLimitX96: 0n,
   };
-
-  // Quote by static-calling the swap itself (needs the balance + approval above),
-  // then bound the real send by the configured slippage.
-  const quoted = await router.exactInputSingle.staticCall(params);
-  params.amountOutMinimum = (quoted * BigInt(Math.round((100 - config.slippagePct) * 100))) / 10000n;
-
   const baseDecimals = await getDecimals(token);
-  const balBefore = await readTokenBalance(token, wallet.address);
-  const tx = await router.exactInputSingle(params);
-  await tx.wait();
-  console.log(`[tx] buy ${token} with ${ethAmount} WETH: ${tx.hash}`);
-  const balAfter = await readTokenBalance(token, wallet.address);
 
-  const boughtRaw = balAfter - balBefore;
-  return {
-    signature: tx.hash,
-    tokensBought: Number(boughtRaw) / 10 ** baseDecimals,
-    tokensBoughtRaw: boughtRaw.toString(),
-    baseDecimals,
-    simulated: false,
-  };
+  // Re-quote across all tiers on every attempt and bound the send by the
+  // configured slippage. A one-block price spike (bot volume, sandwich) makes
+  // the send revert on the min-output check — that protection is correct, but
+  // it must not kill the cycle: wait out the spike and try again fresh.
+  let lastErr;
+  for (let attempt = 1; attempt <= BUY_ATTEMPTS; attempt++) {
+    const best = await bestQuote(router, baseParams);
+    if (!best) throw new Error(`no usable pool for ${token} on fee tiers ${FEE_TIERS.join('/')}`);
+    const params = {
+      ...baseParams,
+      fee: best.fee,
+      amountOutMinimum:
+        (best.quoted * BigInt(Math.round((100 - config.slippagePct) * 100))) / 10000n,
+    };
+
+    try {
+      const balBefore = await readTokenBalance(token, wallet.address);
+      const tx = await router.exactInputSingle(params);
+      await tx.wait();
+      console.log(`[tx] buy ${token} with ${ethAmount} WETH (tier ${best.fee}): ${tx.hash}`);
+      const balAfter = await readTokenBalance(token, wallet.address);
+
+      const boughtRaw = balAfter - balBefore;
+      return {
+        signature: tx.hash,
+        tokensBought: Number(boughtRaw) / 10 ** baseDecimals,
+        tokensBoughtRaw: boughtRaw.toString(),
+        baseDecimals,
+        simulated: false,
+      };
+    } catch (err) {
+      lastErr = err;
+      console.warn(
+        `[buy] attempt ${attempt}/${BUY_ATTEMPTS} reverted on tier ${best.fee} — requoting${attempt < BUY_ATTEMPTS ? ' after 3s' : ''}`
+      );
+      if (attempt < BUY_ATTEMPTS) await new Promise((r) => setTimeout(r, 3000));
+    }
+  }
+  throw lastErr;
 }
 
 module.exports = { buyToken, resolvePoolFee, DEFAULT_POOL_FEE };
