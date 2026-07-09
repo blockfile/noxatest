@@ -35,7 +35,7 @@ app.get('/', (req, res) => {
   res.json({
     name: 'noxa-rewards',
     description:
-      'NOXA Fun creator fees → buy reward token for holders (claims every 5 minutes, Robinhood Chain)',
+      'NOXA Fun creator fees → buy reward token for holders (claims at $20 accrued, Robinhood Chain)',
     dryRun: config.dryRun,
     chainId: config.chainId,
     wallet: walletAddress(),

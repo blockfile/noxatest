@@ -4,7 +4,7 @@ Port of the BABYCUPSY reward system (Solana / pump.fun) to **NOXA Fun on Robinho
 
 The flow is identical to the original:
 
-1. **Claim** — the scheduler checks every 5 minutes and claims once the accrued creator fees are worth **`CLAIM_THRESHOLD_USD`** (default $20; set 0 to claim whatever accrued on every tick). `POST /api/run` bypasses the threshold.
+1. **Claim** — the scheduler checks every minute (`POLL_SCHEDULE`) and claims once the accrued creator fees are worth **`CLAIM_THRESHOLD_USD`** (default $20; set 0 to claim whatever accrued on every tick). `POST /api/run` bypasses the threshold.
 2. **Buy** — spend 80% of the claim buying the reward token on Uniswap V3.
 3. **Airdrop** — send the bought tokens to your token's holders, pro-rata by holdings (optional per-wallet cap, wallet clustering). The remaining 20% is unwrapped to native ETH so the wallet keeps paying gas.
 
