@@ -86,15 +86,32 @@ async function fetchHoldersFromExplorer(token) {
 // the new blocks since. A bot restart rescans once.
 const logIndex = new Map(); // token -> { fromBlock, balances: Map, inflight: Promise|null }
 
-// First block where the token contract has code (its deployment block), found
-// by binary search — pure RPC, works even when the explorer is lagging.
+// The token's deployment block, so the log scan starts there instead of
+// genesis. Try the explorer first (it knows the creation tx even while its
+// holder index lags), then bisect getCode over history, else genesis — the
+// scan is chunked either way, this only bounds how much history it walks.
 async function findCreationBlock(token, head) {
+  try {
+    const res = await fetch(`${config.explorerApi}/api/v2/addresses/${token}`, {
+      headers: { accept: 'application/json' },
+      signal: AbortSignal.timeout(10000),
+    });
+    if (res.ok) {
+      const info = await res.json();
+      if (info.creation_transaction_hash) {
+        const tx = await provider.getTransactionReceipt(info.creation_transaction_hash);
+        if (tx && tx.blockNumber != null) return tx.blockNumber;
+      }
+    }
+  } catch (_err) {
+    // explorer down — fall through to the RPC bisect
+  }
   let lo = 0;
   let hi = head;
   while (lo < hi) {
     const mid = Math.floor((lo + hi) / 2);
     const code = await provider.getCode(token, mid).catch(() => null);
-    if (code === null) return 0; // archive gap — scan from genesis, chunked anyway
+    if (code === null) return 0; // non-archive RPC — scan from genesis, chunked anyway
     if (code === '0x') lo = mid + 1;
     else hi = mid;
   }
