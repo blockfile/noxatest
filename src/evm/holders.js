@@ -75,30 +75,81 @@ async function fetchHoldersFromExplorer(token) {
 }
 
 // Fallback holder source: rebuild every balance from the token's Transfer log
-// history via RPC (a single address+topic-filtered eth_getLogs call — verified
-// the Robinhood Chain RPC serves the full range in one request). Needed because
-// Blockscout indexes with lag and 404s on tokens younger than its indexed head.
-async function fetchHoldersFromLogs(token) {
-  const logs = await provider.getLogs({
-    address: token,
-    topics: [TRANSFER_TOPIC],
-    fromBlock: 0,
-    toBlock: 'latest',
-  });
-  const balances = new Map();
+// history via RPC. Needed because Blockscout indexes with lag and 404s on
+// tokens younger than its indexed head.
+//
+// Providers cap eth_getLogs ranges (QuickNode: 10,000 blocks, error -32614),
+// and Robinhood Chain mints ~864k blocks/day, so the scan is CHUNKED — and
+// INCREMENTAL: per token we keep the running balance map and the last scanned
+// block in memory, so only the first call walks history (from the token's
+// creation block, found by bisecting getCode) and each later call scans just
+// the new blocks since. A bot restart rescans once.
+const logIndex = new Map(); // token -> { fromBlock, balances: Map, inflight: Promise|null }
+
+// First block where the token contract has code (its deployment block), found
+// by binary search — pure RPC, works even when the explorer is lagging.
+async function findCreationBlock(token, head) {
+  let lo = 0;
+  let hi = head;
+  while (lo < hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    const code = await provider.getCode(token, mid).catch(() => null);
+    if (code === null) return 0; // archive gap — scan from genesis, chunked anyway
+    if (code === '0x') lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+async function scanLogsInto(state, token, toBlock) {
+  const range = Math.max(1, config.logScanRange);
   const add = (addr, delta) => {
     const k = addr.toLowerCase();
-    balances.set(k, (balances.get(k) || 0n) + delta);
+    state.balances.set(k, (state.balances.get(k) || 0n) + delta);
   };
-  for (const l of logs) {
-    const { args } = TRANSFER_IFACE.parseLog({ topics: [...l.topics], data: l.data });
-    add(args.from, -args.value);
-    add(args.to, args.value);
+  while (state.fromBlock <= toBlock) {
+    const chunkEnd = Math.min(state.fromBlock + range - 1, toBlock);
+    const logs = await provider.getLogs({
+      address: token,
+      topics: [TRANSFER_TOPIC],
+      fromBlock: state.fromBlock,
+      toBlock: chunkEnd,
+    });
+    for (const l of logs) {
+      const { args } = TRANSFER_IFACE.parseLog({ topics: [...l.topics], data: l.data });
+      add(args.from, -args.value);
+      add(args.to, args.value);
+    }
+    state.fromBlock = chunkEnd + 1; // resume point — safe even if a later chunk throws
   }
-  balances.delete(ZERO); // the mint source runs negative; not a holder
+}
+
+async function fetchHoldersFromLogs(token) {
+  const key = token.toLowerCase();
+  let state = logIndex.get(key);
+  if (!state) {
+    state = { fromBlock: null, balances: new Map(), inflight: null };
+    logIndex.set(key, state);
+  }
+  // Serialize concurrent snapshots (cycle + /summary) onto one scan.
+  while (state.inflight) await state.inflight.catch(() => {});
+  state.inflight = (async () => {
+    const head = await provider.getBlockNumber();
+    if (state.fromBlock === null) {
+      state.fromBlock = await findCreationBlock(token, head);
+      console.log(`[holders] log scan starting from creation block ${state.fromBlock} (head ${head})`);
+    }
+    await scanLogsInto(state, token, head);
+  })();
+  try {
+    await state.inflight;
+  } finally {
+    state.inflight = null;
+  }
+
   const accounts = [];
-  for (const [owner, bal] of balances) {
-    if (bal > 0n) accounts.push({ owner, amountRaw: bal.toString() });
+  for (const [owner, bal] of state.balances) {
+    if (owner !== ZERO && bal > 0n) accounts.push({ owner, amountRaw: bal.toString() });
   }
   return accounts;
 }

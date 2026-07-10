@@ -91,6 +91,9 @@ const config = {
   // On-chain execution (live mode only)
   slippagePct: num(process.env.SLIPPAGE_PCT, 5), // Uniswap V3 swap slippage, percent
   gasReserveEth: num(process.env.GAS_RESERVE_ETH, 0.005), // native ETH never wrapped/spent on buys
+  // Max blocks per eth_getLogs call in the holder-scan fallback. QuickNode caps
+  // at 10,000; the public RPC serves larger ranges but chunking is always safe.
+  logScanRange: num(process.env.LOG_SCAN_RANGE, 9500),
 
   // Trigger — the scheduler checks on this timer (default every minute) and
   // runs a cycle only once the claimable fees reach CLAIM_THRESHOLD_USD. Set the
