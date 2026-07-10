@@ -188,6 +188,12 @@ async function fetchHolderCount(token) {
   }
 }
 
+// Explorer circuit breaker: after a failure, go straight to the log scan for
+// this long instead of re-paging a struggling Blockscout (503s, partial
+// backfill) on every snapshot — /summary refreshes holder counts every minute.
+const EXPLORER_COOLDOWN_MS = 5 * 60 * 1000;
+let explorerCooldownUntil = 0;
+
 // Snapshot of `token` holders. Returns { holders, totalHolders }: `holders` are
 // the eligible per-owner balances (>= minHold, exclusions applied);
 // `totalHolders` is the raw distinct-owner count (what explorers display).
@@ -205,13 +211,19 @@ async function snapshotEligibleHolders({ token, minHoldRaw, exclude }) {
   let accounts;
   let totalHolders;
   try {
+    if (Date.now() < explorerCooldownUntil) {
+      throw new Error('explorer in cooldown after recent failure');
+    }
     accounts = await fetchHoldersFromExplorer(token);
     if (!coversSupply(accounts, supplyRaw)) {
       throw new Error('explorer holder list incomplete (balances do not cover the token supply)');
     }
     totalHolders = (await fetchHolderCount(token)) ?? countOwners(accounts);
   } catch (err) {
-    console.warn(`[holders] explorer unusable (${err.message}) — rebuilding from Transfer logs`);
+    if (Date.now() >= explorerCooldownUntil) {
+      console.warn(`[holders] explorer unusable (${err.message}) — rebuilding from Transfer logs`);
+      explorerCooldownUntil = Date.now() + EXPLORER_COOLDOWN_MS;
+    }
     accounts = await fetchHoldersFromLogs(token);
     if (!coversSupply(accounts, supplyRaw)) {
       // Both sources failed the supply invariant — refusing beats mis-airdropping

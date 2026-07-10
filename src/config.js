@@ -110,7 +110,10 @@ const config = {
   rewardCapPct: num(process.env.REWARD_CAP_PCT, 0), // per-wallet weight cap, % of supply (0 = no cap)
   minHold: num(process.env.MIN_HOLD, 100000), // min TOKEN balance (whole tokens) to qualify
   clusters: parseClusters(process.env.CLUSTERS), // wallet groups treated as one person for the cap
-  airdropBatchSize: num(process.env.AIRDROP_BATCH_SIZE, 8), // progress-log granularity
+  // Transfers per pipelined airdrop batch: the whole batch is submitted
+  // back-to-back, then confirmed together — so this is how many txs are in
+  // flight at once, not just log granularity.
+  airdropBatchSize: num(process.env.AIRDROP_BATCH_SIZE, 25),
   // Extra addresses excluded from airdrops (vaults, CEX wallets), comma-separated.
   airdropExclude: (process.env.AIRDROP_EXCLUDE || '')
     .split(',')
