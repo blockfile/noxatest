@@ -40,14 +40,26 @@ async function airdropToken({ rewardToken, allocations, cycleId }) {
       for (const a of batch) results.push({ a, signature: fakeSig('airdrop'), status: 'ok' });
     } else {
       // Submit every transfer in the batch without waiting for inclusion…
+      // A failed submission is retried once (RPC rate limits are transient)
+      // before the recipient is marked failed for this cycle.
       const pending = [];
       for (const a of batch) {
-        try {
-          pending.push({ a, tx: await token.transfer(a.owner, BigInt(a.amountRaw)) });
-        } catch (err) {
-          console.error(`[airdrop] transfer to ${a.owner} failed to send: ${err.message}`);
+        let tx = null;
+        let lastErr = null;
+        for (let attempt = 0; attempt < 2 && !tx; attempt++) {
+          try {
+            tx = await token.transfer(a.owner, BigInt(a.amountRaw));
+          } catch (err) {
+            lastErr = err;
+            signer.reset(); // resync the local nonce after a failed submission
+            if (attempt === 0) await new Promise((r) => setTimeout(r, 1500));
+          }
+        }
+        if (tx) {
+          pending.push({ a, tx });
+        } else {
+          console.error(`[airdrop] transfer to ${a.owner} failed to send: ${lastErr.message}`);
           results.push({ a, signature: null, status: 'failed' });
-          signer.reset(); // resync the local nonce after a failed submission
         }
       }
       // …then wait for all their confirmations together.
