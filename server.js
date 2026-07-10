@@ -25,7 +25,9 @@ app.use(
   cors({
     origin(origin, cb) {
       if (!origin || allowAll || config.corsOrigins.includes(origin)) return cb(null, true);
-      return cb(new Error(`origin ${origin} not allowed by CORS`));
+      const err = new Error(`origin ${origin} not allowed by CORS`);
+      err.corsRejected = true; // handled quietly below — copycat sites spam this
+      return cb(err);
     },
   })
 );
@@ -71,8 +73,20 @@ app.use('/', publicRoutes);
 
 app.use((req, res) => res.status(404).json({ error: 'not found' }));
 
+// Disallowed origins (copycat sites embedding this API) get a terse 403 and at
+// most ONE log line per origin — not a stack trace per request.
+const loggedBlockedOrigins = new Set();
+
 // eslint-disable-next-line no-unused-vars
 app.use((err, req, res, next) => {
+  if (err && err.corsRejected) {
+    const origin = req.get('origin') || 'unknown';
+    if (!loggedBlockedOrigins.has(origin)) {
+      loggedBlockedOrigins.add(origin);
+      console.warn(`[noxa-rewards] blocking CORS origin: ${origin}`);
+    }
+    return res.status(403).json({ error: 'origin not allowed' });
+  }
   console.error('[noxa-rewards] request error:', err);
   res.status(500).json({ error: err.message });
 });
