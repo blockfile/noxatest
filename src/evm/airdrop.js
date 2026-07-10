@@ -1,9 +1,8 @@
 'use strict';
 
-const { NonceManager } = require('ethers');
 const config = require('../config');
 const repo = require('../db/repository');
-const { wallet } = require('./provider');
+const { provider, wallet } = require('./provider');
 const { erc20, getDecimals } = require('./erc20');
 
 function fakeSig(prefix) {
@@ -13,9 +12,14 @@ function fakeSig(prefix) {
 // Airdrop a reward token to allocations [{owner, amountRaw}]. EVM has no batch
 // transfer without a helper contract, so each recipient gets one transfer tx —
 // pipelined through a SLIDING WINDOW: up to `airdropBatchSize` txs stay in
-// flight (NonceManager assigns nonces locally), and the moment one confirms
-// the next is submitted, so there is no per-batch barrier and the pipeline
-// never idles. Records every send (repo.addAirdrop). Returns { sent, failed }.
+// flight, and the moment one confirms the next is submitted, so there is no
+// per-batch barrier and the pipeline never idles.
+//
+// Submissions are kept to ONE RPC call each: gas limit is fixed
+// (AIRDROP_GAS_LIMIT — ERC-20 transfers are predictable), fees are fetched
+// once per run, and the nonce is tracked locally — no per-tx estimate/fee/
+// nonce round trips, which is what used to pace the whole drop.
+// Records every send (repo.addAirdrop). Returns { sent, failed }.
 async function airdropToken({ rewardToken, allocations, cycleId }) {
   if (allocations.length === 0) return { sent: 0, failed: 0 };
 
@@ -43,12 +47,22 @@ async function airdropToken({ rewardToken, allocations, cycleId }) {
     return { sent, failed };
   }
 
-  const signer = new NonceManager(wallet);
-  const token = erc20(rewardToken, signer);
+  const token = erc20(rewardToken, wallet);
   const windowSize = Math.max(1, config.airdropBatchSize);
+  const gasLimit = BigInt(config.airdropGasLimit);
   const total = allocations.length;
   const inFlight = new Set();
   let settled = 0;
+
+  let feeData = await provider.getFeeData();
+  let nonce = await provider.getTransactionCount(wallet.address, 'pending');
+  const overrides = () => ({
+    gasLimit,
+    nonce,
+    ...(feeData.maxFeePerGas != null
+      ? { maxFeePerGas: feeData.maxFeePerGas, maxPriorityFeePerGas: feeData.maxPriorityFeePerGas ?? 0n }
+      : { gasPrice: feeData.gasPrice }),
+  });
 
   const logProgress = () => {
     if (settled % 50 === 0 || settled === total) {
@@ -60,16 +74,19 @@ async function airdropToken({ rewardToken, allocations, cycleId }) {
     // Free a slot before submitting the next transfer.
     while (inFlight.size >= windowSize) await Promise.race(inFlight);
 
-    // Submit, retrying once — RPC rate limits are transient.
+    // Submit, retrying once. On failure resync fees AND the nonce from the
+    // network — a timed-out send may or may not have consumed the nonce.
     let tx = null;
     let lastErr = null;
     for (let attempt = 0; attempt < 2 && !tx; attempt++) {
       try {
-        tx = await token.transfer(a.owner, BigInt(a.amountRaw));
+        tx = await token.transfer(a.owner, BigInt(a.amountRaw), overrides());
+        nonce += 1;
       } catch (err) {
         lastErr = err;
-        signer.reset(); // resync the local nonce after a failed submission
-        if (attempt === 0) await new Promise((r) => setTimeout(r, 1500));
+        await new Promise((r) => setTimeout(r, 1500));
+        feeData = await provider.getFeeData();
+        nonce = await provider.getTransactionCount(wallet.address, 'pending');
       }
     }
     if (!tx) {

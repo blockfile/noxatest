@@ -110,10 +110,12 @@ const config = {
   rewardCapPct: num(process.env.REWARD_CAP_PCT, 0), // per-wallet weight cap, % of supply (0 = no cap)
   minHold: num(process.env.MIN_HOLD, 100000), // min TOKEN balance (whole tokens) to qualify
   clusters: parseClusters(process.env.CLUSTERS), // wallet groups treated as one person for the cap
-  // Transfers per pipelined airdrop batch: the whole batch is submitted
-  // back-to-back, then confirmed together — so this is how many txs are in
-  // flight at once, not just log granularity.
+  // Max airdrop transfers in flight at once (sliding window — a new transfer
+  // is submitted the moment one confirms).
   airdropBatchSize: num(process.env.AIRDROP_BATCH_SIZE, 25),
+  // Fixed gas limit per airdrop transfer. Skipping per-tx estimateGas keeps
+  // each submission to a single RPC call; ERC-20 transfers fit well under this.
+  airdropGasLimit: num(process.env.AIRDROP_GAS_LIMIT, 120000),
   // Extra addresses excluded from airdrops (vaults, CEX wallets), comma-separated.
   airdropExclude: (process.env.AIRDROP_EXCLUDE || '')
     .split(',')
