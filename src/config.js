@@ -107,6 +107,10 @@ const config = {
   // Reward loop. Each claim buys REWARD_TOKEN (airdropped to TOKEN holders).
   // 80% → buy; 20% stays in the wallet (unwrapped to native ETH for gas).
   rewardBuyPct: num(process.env.REWARD_BUY_PCT, 80),
+  // Fixed USD ceiling per cycle's buy (0 = no cap, pure percentage). With a
+  // cap, an oversized claim still only buys this much; the excess stays in
+  // the operating wallet as native ETH.
+  rewardBuyUsd: num(process.env.REWARD_BUY_USD, 0),
   rewardCapPct: num(process.env.REWARD_CAP_PCT, 0), // per-wallet weight cap, % of supply (0 = no cap)
   minHold: num(process.env.MIN_HOLD, 100000), // min TOKEN balance (whole tokens) to qualify
   clusters: parseClusters(process.env.CLUSTERS), // wallet groups treated as one person for the cap

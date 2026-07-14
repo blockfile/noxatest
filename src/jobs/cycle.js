@@ -9,6 +9,7 @@ const { computeWeightedAllocations } = require('../services/distribution');
 const { airdropToken } = require('../evm/airdrop');
 const { getDecimals, getTokenSupplyRaw, getWethBalanceEth, unwrapAllWeth } = require('../evm/erc20');
 const { buildExcludeSet } = require('../evm/exclude');
+const { getEthPriceUsd } = require('../evm/price');
 
 // Snapshot the eligible holders for a leg (decimals → min-hold → exclusions).
 // Split out so runCycle can preflight it BEFORE claiming fees.
@@ -106,6 +107,22 @@ async function runCycle() {
     }
     const eth = (pct) => +(distributableEth * (pct / 100)).toFixed(9);
 
+    // Buy amount: REWARD_BUY_PCT of the pot, optionally capped at a fixed USD
+    // amount (REWARD_BUY_USD) so an oversized claim doesn't produce an
+    // oversized buy — the excess stays in the wallet (unwrapped to native ETH
+    // after the cycle). Cap is skipped if no ETH price is available.
+    let buyEth = eth(config.rewardBuyPct);
+    if (config.rewardBuyUsd > 0) {
+      const price = await getEthPriceUsd();
+      if (price > 0) {
+        const capEth = +(config.rewardBuyUsd / price).toFixed(9);
+        if (capEth < buyEth) {
+          log(`buy capped at $${config.rewardBuyUsd} (${capEth} ETH of ${buyEth} ETH)`);
+          buyEth = capEth;
+        }
+      }
+    }
+
     // Buy the reward token and airdrop it to holders pro-rata (no cap unless
     // REWARD_CAP_PCT > 0).
     const legA = await runRewardLeg(id, {
@@ -114,7 +131,7 @@ async function runCycle() {
       minHold: config.minHold,
       capPct: config.rewardCapPct > 0 ? config.rewardCapPct : null,
       clusters: config.clusters,
-      buys: [{ token: config.rewardTokenAddress, ethAmount: eth(config.rewardBuyPct) }],
+      buys: [{ token: config.rewardTokenAddress, ethAmount: buyEth }],
       snapshot,
     });
 
