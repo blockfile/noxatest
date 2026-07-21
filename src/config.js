@@ -115,11 +115,15 @@ const config = {
   minHold: num(process.env.MIN_HOLD, 100000), // min TOKEN balance (whole tokens) to qualify
   clusters: parseClusters(process.env.CLUSTERS), // wallet groups treated as one person for the cap
   // Max airdrop transfers in flight at once (sliding window — a new transfer
-  // is submitted the moment one confirms).
+  // is submitted the moment one confirms). With DISPERSE_ADDRESS set it is the
+  // number of recipients per disperse tx instead.
   airdropBatchSize: num(process.env.AIRDROP_BATCH_SIZE, 25),
   // Fixed gas limit per airdrop transfer. Skipping per-tx estimateGas keeps
   // each submission to a single RPC call; ERC-20 transfers fit well under this.
   airdropGasLimit: num(process.env.AIRDROP_GAS_LIMIT, 120000),
+  // Batch-transfer (disperse) contract: disperseToken(token, recipients, values).
+  // Set → one tx per batch (fastest for large drops); null → pipelined transfers.
+  disperseAddress: lowerOrNull(process.env.DISPERSE_ADDRESS),
   // Extra addresses excluded from airdrops (vaults, CEX wallets), comma-separated.
   airdropExclude: (process.env.AIRDROP_EXCLUDE || '')
     .split(',')

@@ -1,25 +1,35 @@
 'use strict';
 
+// Airdrop a reward token to allocations [{owner, amountRaw}]. Records every
+// recipient (repo.addAirdrop) so partial failures are visible. Three send paths:
+//   - DRY_RUN          → simulate the sends (no chain calls).
+//   - DISPERSE_ADDRESS → one tx per batch via a disperse contract
+//     (disperseToken(token, recipients[], values[])); the token must be
+//     pre-approved to the disperse contract. Fewest txs for very large drops.
+//   - otherwise        → sliding-window pipelined ERC-20 transfers: up to
+//     `airdropBatchSize` txs stay in flight, the nonce is tracked locally, and
+//     gas/fees are fixed — no per-tx estimate/fee/nonce round trips.
+
+const { Contract } = require('ethers');
 const config = require('../config');
 const repo = require('../db/repository');
 const { provider, wallet } = require('./provider');
 const { erc20, getDecimals } = require('./erc20');
+const { sendTx } = require('./send');
+
+const DISPERSE_ABI = ['function disperseToken(address token, address[] recipients, uint256[] values)'];
+
+function chunk(arr, n) {
+  const out = [];
+  const size = Math.max(1, n | 0);
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
 
 function fakeSig(prefix) {
   return `${prefix}_${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`;
 }
 
-// Airdrop a reward token to allocations [{owner, amountRaw}]. EVM has no batch
-// transfer without a helper contract, so each recipient gets one transfer tx —
-// pipelined through a SLIDING WINDOW: up to `airdropBatchSize` txs stay in
-// flight, and the moment one confirms the next is submitted, so there is no
-// per-batch barrier and the pipeline never idles.
-//
-// Submissions are kept to ONE RPC call each: gas limit is fixed
-// (AIRDROP_GAS_LIMIT — ERC-20 transfers are predictable), fees are fetched
-// once per run, and the nonce is tracked locally — no per-tx estimate/fee/
-// nonce round trips, which is what used to pace the whole drop.
-// Records every send (repo.addAirdrop). Returns { sent, failed }.
 async function airdropToken({ rewardToken, allocations, cycleId }) {
   if (allocations.length === 0) return { sent: 0, failed: 0 };
 
@@ -36,22 +46,79 @@ async function airdropToken({ rewardToken, allocations, cycleId }) {
       status,
     });
 
-  let sent = 0;
-  let failed = 0;
-
   if (config.dryRun) {
-    for (const a of allocations) {
-      await record(a, fakeSig('airdrop'), 'ok');
-      sent += 1;
-    }
-    return { sent, failed };
+    for (const a of allocations) await record(a, fakeSig('airdrop'), 'ok');
+    return { sent: allocations.length, failed: 0 };
   }
 
+  if (config.disperseAddress) return disperseAirdrop({ rewardToken, allocations, record });
+  return pipelineAirdrop({ rewardToken, allocations, record });
+}
+
+// The disperse contract moves the tokens with transferFrom, so it must be
+// approved to spend this reward token. Approve max once per token — after that
+// the allowance is huge and this is a no-op.
+async function ensureDisperseApproval(token, needed) {
+  const t = erc20(token, wallet);
+  const allowance = await t.allowance(wallet.address, config.disperseAddress).catch(() => 0n);
+  if (allowance >= needed) return;
+  const tx = await sendTx(() => t.approve(config.disperseAddress, (1n << 256n) - 1n));
+  await tx.wait();
+  console.log(`[airdrop] approved ${token} → disperse ${config.disperseAddress}: ${tx.hash}`);
+}
+
+// One disperseToken tx per batch (nonce-safe via sendTx) — hundreds of
+// recipients paid in a single transaction instead of one tx each. A whole batch
+// shares a tx, so a batch either lands for everyone in it or is recorded failed
+// together.
+async function disperseAirdrop({ rewardToken, allocations, record }) {
+  const disperse = new Contract(config.disperseAddress, DISPERSE_ABI, wallet);
+
+  // Approve the disperse contract for the full amount about to be dispersed.
+  const total = allocations.reduce((s, a) => s + BigInt(a.amountRaw), 0n);
+  try {
+    await ensureDisperseApproval(rewardToken, total);
+  } catch (err) {
+    console.error(`[airdrop] disperse approval failed for ${rewardToken}: ${err.message}`);
+    for (const a of allocations) await record(a, null, 'failed');
+    return { sent: 0, failed: allocations.length };
+  }
+
+  let sent = 0;
+  let failed = 0;
+  for (const batch of chunk(allocations, config.airdropBatchSize)) {
+    const recipients = batch.map((a) => a.owner);
+    const values = batch.map((a) => BigInt(a.amountRaw));
+    let hash = null;
+    let status = 'ok';
+    try {
+      const tx = await sendTx(() => disperse.disperseToken(rewardToken, recipients, values));
+      await tx.wait();
+      hash = tx.hash;
+    } catch (err) {
+      status = 'failed';
+      console.error(`[airdrop] disperse batch failed: ${err.message}`);
+    }
+    for (const a of batch) {
+      await record(a, status === 'ok' ? hash : null, status);
+      if (status === 'ok') sent += 1;
+      else failed += 1;
+    }
+  }
+  return { sent, failed };
+}
+
+// Sliding-window pipeline: keep up to `airdropBatchSize` transfers in flight,
+// and the moment one confirms, submit the next. Nonce tracked locally; gas/fees
+// fixed — one RPC call per submission.
+async function pipelineAirdrop({ rewardToken, allocations, record }) {
   const token = erc20(rewardToken, wallet);
   const windowSize = Math.max(1, config.airdropBatchSize);
   const gasLimit = BigInt(config.airdropGasLimit);
   const total = allocations.length;
   const inFlight = new Set();
+  let sent = 0;
+  let failed = 0;
   let settled = 0;
 
   let feeData = await provider.getFeeData();
@@ -121,4 +188,4 @@ async function airdropToken({ rewardToken, allocations, cycleId }) {
   return { sent, failed };
 }
 
-module.exports = { airdropToken };
+module.exports = { airdropToken, chunk };
